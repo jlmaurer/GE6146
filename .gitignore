@@ -1,0 +1,3 @@
+*.config
+config.py
+notebooks/.ipynb_checkpoints/
