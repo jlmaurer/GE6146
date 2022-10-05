@@ -1,0 +1,13 @@
+# create environment : conda env create -f environment-dev.yml
+# update dependencies: conda env update -f environment-dev.yml
+# remove environment : conda env remove -n ge6146
+# enter  environment : conda activate ge6146
+# exit   environment : conda deactivate
+name: ge6146
+dependencies:
+ - python>=3.8
+ - matplotlib
+ - numpy
+ - pandas
+ - pyproj>=2.2.0
+ - pip
