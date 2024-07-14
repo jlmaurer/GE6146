@@ -1,8 +1,13 @@
-import numpy as np
-import gdal
-import glob
 import datetime
+import glob
 import h5py
+import os
+import rasterio
+import re
+
+import numpy as np
+from osgeo import gdal
+
 
 def main(ifgList,refCenter=None,refSize=None):
     '''
@@ -11,8 +16,7 @@ def main(ifgList,refCenter=None,refSize=None):
     datePairs, dates = getDates(ifgList)
     fracDates = np.array([dt2fracYear(d) for d in dates])
     G = makeG(dates, datePairs)
-    xSize, ySize, dType, geoProj, trans, noDataVal, Nbands = readRaster(ifgList[0])
-    data = getData(ifgs,1)
+    data = getData(ifgList,1)
     data = dereference(data, taxis=0,refCenter=refCenter,refSize=refSize)
     tsArray = makeTS(G, data, fracDates)
     vel = findMeanVel(tsArray, fracDates, 0)
@@ -23,8 +27,10 @@ def main(ifgList,refCenter=None,refSize=None):
 def getDates(ifgList):
     datePairs = []
     unique_dates = []
+
     for ifg in ifgList:
-        d1, d2 = [datetime.datetime.strptime(d, '%Y%m%d') for d in ifg.split('/')[-1].split('.')[0].split('_')[:2]]
+        ds1, ds2 = re.search("\d{8}T*\d*_\d{8}T*\d*", ifg).group().split('_') # grab the date(time) strings
+        d1, d2 = [datetime.datetime.strptime(re.sub('T\d{6}', '', d), '%Y%m%d') for d in (ds1, ds2)] # remove any time signature
         if d1 not in unique_dates:
             unique_dates.append(d1)
         if d2 not in unique_dates:
@@ -45,11 +51,7 @@ def dt2fracYear(date):
     s = sinceEpoch
 
     # check that the object is a datetime
-    try:
-        year = date.year
-    except AttributeError:
-        date = numpyDT64ToDatetime(date)
-        year = date.year
+    year = date.year
 
     startOfThisYear = dt.datetime(year=year, month=1, day=1)
     startOfNextYear = dt.datetime(year=year+1, month=1, day=1)
@@ -187,50 +189,59 @@ def readIFG(ifg, band_num=1, xstart=0, ystart=0, xStep=None,yStep=None):
     return data
 
 
-def gdal_open(fname, returnProj = False):
+def gdal_open(fname, returnProj=False, userNDV=None, band=None):
     '''
-    Read the data in a gdal-readable file and return it
-    as a numpy array
+    Reads a rasterio-compatible raster file and returns the data and profile
     '''
-    import gdal
-    import numpy as np
+    if rasterio is None:
+        raise ImportError('RAiDER.utilFcns: rio_open - rasterio is not installed')
 
-    # check for an existing vrt
-    fname = check4VRT(fname)
-    ds = gdal.Open(fname, gdal.GA_ReadOnly)
-    if ds is None:
-        raise RuntimeError('File {} could not be opened'.format(fname))
-    proj = ds.GetProjection()
+    if os.path.exists(fname + '.vrt'):
+        fname = fname + '.vrt'
 
-    val = []
-    for band in range(ds.RasterCount):
-        bk = ds.GetRasterBand(band + 1) # gdal counts from 1, not 0
-        dk = bk.ReadAsArray()
-        try:
-            ndv = bk.GetNoDataValue()
-            dk[dk==ndv]=np.nan
-        except:
-            try:
-#            if np.sum(d==0.) > 0:
-#                print('NoDataValue not found, using 0.')
-                dk[dk==0.] = np.nan
-#            else:
-            except:
-                print('NoDataValue attempt failed*******')
-                pass
-        val.append(dk)
-        bk = None
-    ds = None
+    with rasterio.open(fname) as src:
+        profile = src.profile
 
-    if len(val) > 1:
-        data = np.stack(val)
-    else:
-        data = val[0]
+        # For all bands
+        nodata = src.nodatavals
+
+        # If user requests a band
+        if band is not None:
+            ndv = nodata[band - 1]
+            data = src.read(band).squeeze()
+            nodataToNan(data, [userNDV, nodata[band - 1]])
+
+        else:
+            data = src.read().squeeze()
+            if data.ndim > 2:
+                for bnd in range(data.shape[0]):
+                    val = data[bnd, ...]
+                    nodataToNan(val, [userNDV, nodata[bnd]])
+            else:
+                nodataToNan(data, list(nodata) + [userNDV])
+
+
+        if data.ndim > 2:
+            dlist = []
+            for k in range(data.shape[0]):
+                dlist.append(data[k,...].copy())
+            data = dlist
 
     if not returnProj:
         return data
+
     else:
-        return data, proj
+        return data, profile
+    
+
+def nodataToNan(inarr, listofvals):
+    """
+    Setting values to nan as needed
+    """
+    inarr = inarr.astype(float) # nans cannot be integers (i.e. in DEM)
+    for val in listofvals:
+        if val is not None:
+            inarr[inarr == val] = np.nan
         
 
 def getTSfromIFGs(i,j,ifg, band_num=1):
